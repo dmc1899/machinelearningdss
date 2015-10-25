@@ -1,0 +1,153 @@
+---
+title: Building a classification model to predict class of exercise activity.
+author: "Darragh McConville"
+date: "25 October 2015"
+output: html_document
+---
+## 1. Overview
+This report describes the process followed to build a predictive model to estimate the nature of exercise performed
+by subjects as part of the Weight Lifting data set created as documented here:  http://groupware.les.inf.puc-rio.br/har.
+
+### 1.1 Purpose
+My objective was to predict one of five values (A-E) which indicated how well or poorly subjects performed exercises.
+This target variable was labelled as the classe variable within the dataset.
+
+### 1.2 Libraries
+```{r}
+library(dplyr)
+library(tidyr)
+library(caret)
+library(corrplot)
+library(randomForest)
+```
+
+## 2. Data Processing
+Read in the data, ignoring NA values and their equivalents then remove those variables which add no value to our prediction,
+such as user_name and new_window.
+```{r}
+testing_data <- read.table("pml-testing.csv", header = TRUE, sep = ",",na.strings = c("NA", ""))
+training_data <- read.table("pml-training.csv", header = TRUE, sep = ",", na.strings = c("NA", ""), stringsAsFactors=FALSE)
+
+ignoredvariableregex  <- "X|user_name|_timestamp|new_window|num_window"
+includedvariabledf  <- select(training_data,-matches(ignoredvariableregex))
+includedvariabledf_testing  <- select(testing_data,-matches(ignoredvariableregex))
+```
+
+We tidy up the training data set first, using the tidied dataset of 127 variables, identify and remove those for which values are missing.  This creates a reduced variable dataset containing 41 columns. We then set the classe variable to
+be a factor. Finally, we identify which of the remaining variables have a zero, or near-zero variance - none.
+```{r}
+navarsidentified  <- is.na(includedvariabledf)
+numnavars  <- colSums(navarsidentified)
+completevars  <- numnavars == 0
+
+reducedvardf  <- includedvariabledf[completevars]
+
+reducedvardf$classe  <- as.factor(reducedvardf$classe)
+
+nearzerovars  <- nearZeroVar(reducedvardf[sapply(reducedvardf, is.numeric)], saveMetrics=TRUE)
+filter(nearzerovars, zeroVar==TRUE | nzv == TRUE)
+
+refinedtrainingset  <- reducedvardf
+```
+
+Now we follow the same procedure for the testing data set.
+```{r}
+navarsidentified  <- is.na(includedvariabledf_testing)
+numnavars  <- colSums(navarsidentified)
+completevars  <- numnavars == 0
+
+# We now have a reduced variable dataset containing 41 columns.
+reducedvardf  <- includedvariabledf_testing[completevars]
+
+refinedtestingset <- includedvariabledf_testing[colSums(is.na(includedvariabledf_testing)) == 0]
+```
+
+
+## 3. Data Splitting
+We have an ample number of observations to allow us to create our own training, testing and validation
+datasets from the offical pml_training set provided. We will use the ratio of 60% training, 20% testing and 20% validation.
+```{r}
+inTrain  <- createDataPartition(y=refinedtrainingset$classe, p=0.6, list=FALSE)
+mytraining  <- refinedtrainingset[inTrain,]
+mytestingandvalidation  <- refinedtrainingset[-inTrain,]
+
+# This takes 50% of 40% - 20% each for validation and testing sets.
+inTesting  <- createDataPartition(y=mytestingandvalidation$classe, p=0.5, list=FALSE)
+mytesting  <- mytestingandvalidation[inTesting,]
+myvalidation  <- mytestingandvalidation[-inTesting,]
+```
+
+
+## 4. Principal Component Analysis
+We identify correlations between numeric variables which suggests performing a PCA exercise would be beneficial.
+Performing PCA allowed the number of predictor variables to be reduced from 41 to 23 which would still capture 95% of the variance.  We then apply the PCA model to the training, testing and validation data sets.
+```{r}
+predictor_corr <- round(cor(mytraining[sapply(mytraining, is.numeric)]), 2)
+
+par(ps=5)
+corrplot.mixed(predictor_corr, order = "hclust", tl.col="black", diag = "n", tl.pos = "lt", 
+               lower = "circle", upper = "number", tl.cex = 1.5, mar=c(1,0,1,0))
+
+
+preproc  <- preProcess(mytraining[,-41],method="pca")
+
+mytrainingpc  <- predict(preproc,mytraining[,-41])
+mytestinggpc  <- predict(preproc,mytesting[,-41])
+myvalidationpc  <- predict(preproc,myvalidation[,-41])
+```
+ 
+## 5. Model Fitting with PCA
+As we are performing a multi-value classification, a random forest method is suitable to attempt.
+We train the using cross-validation and predict the values against the validation data set.  We 
+create a confusion matrix which will identify the accuracy of almost 97%.
+
+We can calculate the out of sample error by subtracting the accuracy rate from 1.The out-of-sample error is around 3%.
+```{r}
+model.1.rf  <- train(mytraining$classe ~ ., method="rf", data=mytrainingpc,trControl = trainControl(method = "cv", number = 4),ntree=100,importance=TRUE)
+
+model.1.rf.validate <- predict(model.1.rf, myvalidationpc)
+
+confusionmatrix <- confusionMatrix(myvalidation$classe, model.1.rf.validate)
+confusionmatrix$table
+
+outofsampleerror  <- 1 - (postResample(myvalidation$classe, model.1.rf.validate)[[1]])
+```
+
+## 5. Model Fitting without PCA
+We can now try and create the same model without PCA. We create a confusion matrix which will identify the accuracy of over 99%.  We can calculate the out of sample error by subtracting the accuracy rate from 1.The out-of-sample error is less than 1%.
+```{r}
+model.2.rf <- train(classe ~ ., method="rf", data=mytraining,trControl = trainControl(method = "cv", number = 4),ntree=100,importance=TRUE)
+
+# Predict the values using the validation dataset.
+model.2.rf.validate <- predict(model.2.rf, myvalidation)
+
+
+confusionmatrix <- confusionMatrix(myvalidation$classe, model.2.rf.validate)
+confusionmatrix$table
+
+outofsampleerror  <- 1 - (postResample(myvalidation$classe, model.2.rf.validate)[[1]])
+```
+
+
+## 6. Final Model without PCA
+Based on the accuracy values returned, performing PCA on our dataset causes a loss in accuracy of around 2%.  
+On this basis,I have decided to use the non-PCA model to proceed to testing phase.
+
+I can estimate the final out-of-sample error on the final testing dataset as follows, returning 0.8%.
+```{r}
+model.2.rf.test  <- predict(model.2.rf, mytesting)
+
+confusionmatrix <- confusionMatrix(mytesting$classe, model.2.rf.test)
+confusionmatrix$table
+
+
+outofsampleerror  <- 1 - (postResample(mytesting$classe, model.2.rf.test)[[1]])
+```
+
+## 7. Final Test
+Finally, we can use the non-PCA consructed model to predict the class values from the 
+witheld testing set. This results in an accuracy rate of 99.65%, returning a final out of sample error of 0.35%.
+```{r}
+model.2.answers   <- predict(model.2.rf, refinedtestingset[,-41])
+model.2.answers
+```
